@@ -1,0 +1,59 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+/* The dark-mode block that used to live here only repainted the page background
+   while every component hardcoded bg-white / text-gray-700, which produced
+   unreadable mixed contrast. Light-only until dark styles exist for real. */
+
+html {
+  /* Guards against a stray wide child turning into a horizontal scrollbar. */
+  overflow-x: hidden;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  /* Was hardcoded to Arial, which silently discarded the Geist font that
+     next/font loaded and layout.tsx bound to --font-geist-sans. */
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, Arial, sans-serif;
+  overflow-x: hidden;
+  min-height: 100dvh;
+}
+
+/* Visible keyboard focus everywhere, since the new header adds interactive
+   elements that previously had none. */
+:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+/* iOS zooms any input whose font-size is under 16px on focus. */
+input,
+select,
+textarea,
+button {
+  font-size: max(1rem, 0.875rem);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
