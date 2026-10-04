@@ -9,15 +9,16 @@
 // the tester says "pretend this took 120 seconds". Without it we time it from
 // when the visitor was called.
 
-import { addServiceEvent, getVisitor, setVisitorStatus } from "@/lib/db";
+import { checkAndMarkAlerts } from "@/lib/alerts";
+import { staffKey } from "@/lib/auth";
+import { addServiceEvent, getStats, getVisitor, setVisitorStatus } from "@/lib/db";
 import { ok, fail, run, readJson } from "@/lib/respond";
 import { isNonEmptyString, toCount } from "@/lib/validate";
 
-export async function GET() {
-  return fail("use POST", 405);
-}
-
 export async function POST(request: Request) {
+  const denied = staffKey(request);
+  if (denied) return denied;
+
   return run(async () => {
     const body = await readJson(request);
     if (!body) return fail("request body must be a JSON object");
@@ -45,10 +46,18 @@ export async function POST(request: Request) {
     // record of the day. A new queue starts with these rows as its average.
     const event = await addServiceEvent(visitor.queueId, visitor.id, durationSeconds);
 
+    // Everyone behind them just moved up one place.
+    await checkAndMarkAlerts(visitor.queueId);
+
+    // Stats come back with the visit so the dashboard updates from one call
+    // instead of the frontend having to immediately refetch /list.
+    const stats = await getStats(visitor.queueId);
+
     return ok({
       visitor: served,
       durationSeconds: event.durationSeconds,
       simulated: simulated !== null,
+      stats,
     });
   });
 }

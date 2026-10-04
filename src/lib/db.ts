@@ -46,7 +46,6 @@ type VisitorRow = {
   queue_id: string;
   ticket_no: number;
   name: string;
-  phone: string | null;
   status: VisitorStatus;
   alerted: boolean;
   joined_at: string;
@@ -73,13 +72,15 @@ function rowToQueue(row: QueueRow): Queue {
   };
 }
 
+// `phone` is absent on purpose. It is not a column on `visitors` any more (see
+// 002_phone_split.sql), so a plain row read cannot carry it. listActiveVisitors
+// attaches it separately, for the staff screen only.
 function rowToVisitor(row: VisitorRow): Visitor {
   return {
     id: row.id,
     queueId: row.queue_id,
     ticketNo: row.ticket_no,
     name: row.name,
-    phone: row.phone,
     status: row.status,
     alerted: row.alerted,
     joinedAt: row.joined_at,
@@ -146,27 +147,49 @@ export async function getNextTicketNo(queueId: string): Promise<number> {
 //
 // Reading the max ticket and inserting are two separate steps, so two visitors
 // joining at the same instant can pick the same number. The database has a
-// UNIQUE rule that refuses the second one, so we catch that and try once more.
+// UNIQUE rule that refuses the second one, so we catch that and try again.
+//
+// ponytail: N attempts survive N concurrent joins. Each round of a burst has
+// exactly one winner, so with k people arriving in the same tick you need k
+// attempts. Three was measured to be too few: five simultaneous joins left two
+// of them with a 500, because five people need five attempts and three ran out
+// first. It was raised to 8 to leave real headroom over the five-join burst the
+// smoke test exercises. Do not lower it back to 3 on the strength of an older
+// reading of this comment. The real fix is a Postgres sequence per queue and
+// dropping the read-then-insert entirely.
+const MAX_TICKET_ATTEMPTS = 8;
+
 export async function createVisitor(
   queueId: string,
   name: string,
   phone: string | null = null,
 ): Promise<Visitor> {
-  // One retry. A second collision means something is genuinely wrong, and
-  // looping again would just hammer the database.
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // Each retry re-reads the max, so a retry after a collision is a genuinely
+  // different number rather than the same guess again.
+  for (let attempt = 0; attempt < MAX_TICKET_ATTEMPTS; attempt++) {
     const ticketNo = await getNextTicketNo(queueId);
 
+    // No phone here. It moved to `visitor_phones` in migration 002, and writing
+    // it separately means the publicly readable `visitors` table never holds a
+    // phone number at all -- not even for the moment between two writes.
     const { data, error } = await getSupabaseAdmin()
       .from("visitors")
-      .insert({ queue_id: queueId, name, phone, ticket_no: ticketNo })
+      .insert({ queue_id: queueId, name, ticket_no: ticketNo })
       .select()
       .single();
 
-    if (!error) return rowToVisitor(data as VisitorRow);
+    if (!error) {
+      const visitor = rowToVisitor(data as VisitorRow);
+
+      // Phone is optional, so most joins skip this second write entirely.
+      if (phone !== null) await setVisitorPhone(visitor.id, phone);
+
+      return visitor;
+    }
 
     // Someone else took that ticket number between our read and our insert.
-    if (error.code === DUPLICATE_KEY && attempt === 0) continue;
+    // Keep trying while we are out of attempts.
+    if (error.code === DUPLICATE_KEY && attempt < MAX_TICKET_ATTEMPTS - 1) continue;
 
     dbError(error, `could not add visitor to queue ${queueId}`);
   }
@@ -237,6 +260,53 @@ export async function markAlerted(visitorId: string): Promise<void> {
   if (error) dbError(error, `could not mark visitor ${visitorId} as alerted`);
 }
 
+// Store a visitor's phone number.
+//
+// This table has NO anon read policy on purpose (002_phone_split.sql), so the
+// only role that can read it back is the service role -- which is to say, only
+// our own server. A visitor's phone number is contact data, and the frontend
+// needs it for exactly one screen: the staff list.
+//
+// Upsert rather than insert, so calling this twice for one visitor replaces the
+// number instead of colliding on the primary key.
+export async function setVisitorPhone(visitorId: string, phone: string): Promise<void> {
+  const { error } = await getSupabaseAdmin()
+    .from("visitor_phones")
+    .upsert({ visitor_id: visitorId, phone });
+
+  if (error) dbError(error, `could not save the phone number for visitor ${visitorId}`);
+}
+
+// Read back a set of phone numbers, keyed by visitor id.
+//
+// Only GET /api/queue/list calls this, and that route is staff-gated by
+// auth.ts. Everywhere else in the app goes without a phone number entirely.
+//
+// One extra round trip on the staff list, and only that route pays it. Returns
+// an empty map rather than throwing when there is nothing stored, so the common
+// case (most visitors gave no number) costs no special handling at the call site.
+export async function getVisitorPhones(
+  visitorIds: string[],
+): Promise<Map<string, string>> {
+  const phones = new Map<string, string>();
+
+  // An empty .in() is an error in PostgREST, so short-circuit before querying.
+  if (visitorIds.length === 0) return phones;
+
+  const { data, error } = await getSupabaseAdmin()
+    .from("visitor_phones")
+    .select("visitor_id, phone")
+    .in("visitor_id", visitorIds);
+
+  if (error) dbError(error, "could not load visitor phone numbers");
+
+  for (const row of (data as { visitor_id: string; phone: string }[]) ?? []) {
+    phones.set(row.visitor_id, row.phone);
+  }
+
+  return phones;
+}
+
 // Record how long one visit really took. These rows are what make the
 // prediction adapt to how the desk is actually moving.
 //
@@ -278,21 +348,29 @@ export async function getRecentServiceDurations(
   return (data as { duration_seconds: number }[]).map((r) => r.duration_seconds);
 }
 
-// Two numbers for the staff dashboard: how many we have finished, and how long
-// they waited on average from joining to being served.
+// Three numbers for the staff dashboard: how many we have finished, how long
+// they waited on average, and how long the desk took them on average.
 //
-// servedCount counts everyone with status "served". The average only uses the
-// ones that actually have a served_at time, because a visitor marked served
+// servedCount counts everyone with status "served". avgWaitMinutes only uses
+// the ones that actually have a served_at time, because a visitor marked served
 // without a timestamp still counts as served but has no wait to measure.
 //
-// avgWaitMinutes is null when nobody has been served yet, so the dashboard can
+// avgServiceMinutes comes from service_events rather than the visitor rows,
+// because a simulated demo visit (simulatedSeconds) is recorded there and would
+// be missing from a called_at -> served_at measurement.
+//
+// Both averages are null when there is nothing to measure, so the dashboard can
 // say "no data yet" instead of showing a fake zero.
 // ponytail: averages in JS after fetching the timestamps. Postgres cannot average
 // joined_at -> served_at through PostgREST without a database function. If the
 // served row count ever gets large, move this into a Postgres view.
 export async function getStats(
   queueId: string,
-): Promise<{ servedCount: number; avgWaitMinutes: number | null }> {
+): Promise<{
+  servedCount: number;
+  avgWaitMinutes: number | null;
+  avgServiceMinutes: number | null;
+}> {
   const { data, error } = await getSupabaseAdmin()
     .from("visitors")
     .select("joined_at, served_at")
@@ -302,20 +380,43 @@ export async function getStats(
   if (error) dbError(error, `could not read stats for queue ${queueId}`);
 
   const rows = data as { joined_at: string; served_at: string | null }[];
-  if (rows.length === 0) return { servedCount: 0, avgWaitMinutes: null };
+  const servedCount = rows.length;
 
   // Only the rows we can actually measure.
   const timed = rows.filter((row) => row.served_at !== null);
 
-  if (timed.length === 0) return { servedCount: rows.length, avgWaitMinutes: null };
+  let avgWaitMinutes: number | null = null;
 
-  const totalMinutes = timed.reduce((sum, row) => {
-    const waitedMs = new Date(row.served_at as string).getTime() - new Date(row.joined_at).getTime();
-    return sum + waitedMs / 60000;
-  }, 0);
+  if (timed.length > 0) {
+    const totalMinutes = timed.reduce((sum, row) => {
+      const waitedMs =
+        new Date(row.served_at as string).getTime() - new Date(row.joined_at).getTime();
+      return sum + waitedMs / 60000;
+    }, 0);
 
-  // One decimal place is plenty for a wait time and keeps the UI calm.
-  const avgWaitMinutes = Math.round((totalMinutes / timed.length) * 10) / 10;
+    // One decimal place is plenty for a wait time and keeps the UI calm.
+    avgWaitMinutes = Math.round((totalMinutes / timed.length) * 10) / 10;
+  }
 
-  return { servedCount: rows.length, avgWaitMinutes };
+  // A second, independent read. Not ideal, but the dashboard wants all three
+  // numbers in one response and combining them here beats three round trips.
+  const { data: events, error: eventsError } = await getSupabaseAdmin()
+    .from("service_events")
+    .select("duration_seconds")
+    .eq("queue_id", queueId);
+
+  if (eventsError) dbError(eventsError, `could not read service times for queue ${queueId}`);
+
+  const durations = (events as { duration_seconds: number }[]).map(
+    (r) => r.duration_seconds,
+  );
+
+  let avgServiceMinutes: number | null = null;
+
+  if (durations.length > 0) {
+    const totalSeconds = durations.reduce((sum, d) => sum + d, 0);
+    avgServiceMinutes = Math.round((totalSeconds / durations.length / 60) * 10) / 10;
+  }
+
+  return { servedCount, avgWaitMinutes, avgServiceMinutes };
 }

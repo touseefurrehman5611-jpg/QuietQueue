@@ -4,35 +4,40 @@
 // position and roughly how long they will wait.
 //
 // Body: { queueId: string, name: string, phone?: string }
+//
+// Every rule about what a valid join looks like lives in validateJoinInput in
+// validate.ts, because Asad owns that file and improves it later. Nothing here
+// re-checks or re-trims what it already validated.
 
+import { checkAndMarkAlerts } from "@/lib/alerts";
 import { createVisitor, getQueue, getRecentServiceDurations, listActiveVisitors } from "@/lib/db";
-import { waitEstimate } from "@/lib/prediction";
+import { predictForVisitor } from "@/lib/prediction";
 import { ok, fail, run, readJson } from "@/lib/respond";
-import { isNonEmptyString } from "@/lib/validate";
+import { validateJoinInput } from "@/lib/validate";
 
 export async function POST(request: Request) {
   return run(async () => {
     const body = await readJson(request);
     if (!body) return fail("request body must be a JSON object");
 
-    if (!isNonEmptyString(body?.queueId)) return fail("queueId is required");
-    if (!isNonEmptyString(body?.name)) return fail("name is required");
-
-    // Phone is optional. Ignore it if it is not a real string.
-    const phone = isNonEmptyString(body.phone) ? body.phone.trim() : null;
+    const checked = validateJoinInput(body);
+    if (!checked.valid) return fail(checked.error);
+    const { queueId, name, phone } = checked.clean;
 
     // getQueue fails first if the id is not a real queue, so we never try to
     // insert a visitor pointing at nothing.
-    const queue = await getQueue(body.queueId.trim());
+    const queue = await getQueue(queueId);
 
-    const visitor = await createVisitor(queue.id, body.name.trim(), phone);
+    const visitor = await createVisitor(queue.id, name, phone);
 
-    // Everyone still in the line with a smaller ticket number.
     const active = await listActiveVisitors(queue.id);
-    const peopleAhead = active.filter((v) => v.ticketNo < visitor.ticketNo).length;
-
     const recent = await getRecentServiceDurations(queue.id);
-    const estimate = waitEstimate(peopleAhead, queue, recent);
+    const estimate = predictForVisitor(visitor, active, recent, queue);
+
+    // Joining an empty queue puts somebody straight into the alert window, and
+    // no staff action follows, so nothing else would ever mark them. The alerted
+    // flag makes this safe to run on every join.
+    await checkAndMarkAlerts(queue.id);
 
     return ok(
       {

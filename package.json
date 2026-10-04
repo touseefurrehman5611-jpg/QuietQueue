@@ -7,7 +7,11 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "check:prediction": "node src/lib/prediction.ts"
+    "check:prediction": "node src/lib/prediction.ts",
+    "check:ai": "node src/lib/ai.ts",
+    "check:validate": "node src/lib/validate.ts",
+    "test": "npm run check:prediction && npm run check:ai && npm run check:validate",
+    "smoke": "node scripts/smoke-test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.2",

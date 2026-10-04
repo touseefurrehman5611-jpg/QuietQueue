@@ -22,15 +22,26 @@ export interface Queue {
   createdAt: string;
 }
 
-// Table: visitors
+// Table: visitors, plus one field that is NOT a column on it.
+//
+// Touseef: this file no longer matches the table one-for-one. `phone` moved to
+// its own `visitor_phones` table in migration 002, because the anon key can
+// read `visitors` (Amna's Realtime needs that) and a phone number sitting in a
+// publicly readable column is a real privacy problem. See 002_phone_split.sql.
 export interface Visitor {
   id: string;
   queueId: string;
   // The number on the ticket, in order of arrival.
   ticketNo: number;
   name: string;
-  // Optional. Only used if we add SMS later.
-  phone: string | null;
+  // NOT a column on `visitors`. It lives in `visitor_phones`, which has no anon
+  // read policy, so only the service role can fetch it.
+  //
+  // Only GET /api/queue/list fills this in, because that route is staff-gated.
+  // Everywhere else -- /join, /status, /next, the alert checker -- this stays
+  // undefined, because those code paths have no business reading a phone
+  // number. So a visitor's own status response can never leak one.
+  phone?: string | null;
   status: VisitorStatus;
   // True once we have told this visitor they are nearly up. Stops us texting
   // the same person over and over.

@@ -7,7 +7,7 @@
 // Nothing here talks to the database. The routes fetch the recent service times
 // and pass them in, which keeps this file testable with `node` alone.
 
-import type { PredictionResult, Queue } from "./types";
+import type { PredictionResult, Queue, Visitor } from "./types";
 
 // One person takes about 300 seconds (5 minutes) if nothing is set.
 const DEFAULT_SERVICE_SECONDS = 300;
@@ -60,6 +60,12 @@ export function predict(
   };
 }
 
+// Zero-second rows are ignored: a visit logged with no timing tells us nothing
+// about how long a visit takes. Every average in this file uses this one filter.
+function usableSamples(durations: number[]): number[] {
+  return durations.filter((d) => Number.isFinite(d) && d > 0);
+}
+
 // The real service time to use, averaged from what actually happened recently
 // instead of trusting the number someone typed when the queue was created.
 //
@@ -76,9 +82,23 @@ export function effectiveServiceSeconds(
   recentDurations: number[],
   queueAverage: number,
 ): number {
-  const usable = recentDurations.filter((d) => Number.isFinite(d) && d > 0);
+  const usable = usableSamples(recentDurations);
 
   if (usable.length < MIN_SAMPLES_FOR_MOVING_AVERAGE) return queueAverage;
+
+  const sum = usable.reduce((total, d) => total + d, 0);
+  return sum / usable.length;
+}
+
+// The plain mean of the usable samples, or fallback when there are none.
+//
+// Unlike effectiveServiceSeconds this has no minimum-sample threshold, so one
+// real visit is enough. That is deliberate: this is a display average, not the
+// number a whole dashboard prediction hangs on. Use effectiveServiceSeconds for
+// anything a visitor is shown a wait time from.
+export function computeAverage(durations: number[], fallback: number): number {
+  const usable = usableSamples(durations);
+  if (usable.length === 0) return fallback;
 
   const sum = usable.reduce((total, d) => total + d, 0);
   return sum / usable.length;
@@ -97,16 +117,29 @@ export function waitEstimate(
   return predict(peopleAhead, avgServiceSeconds, queue.speedMultiplier, queue.alertAtPosition);
 }
 
-// Turn the estimate into a few plain words the AI can turn into a sentence.
-// We hand the model facts, not a feeling, so it cannot invent a time.
-export function estimateFacts(estimate: PredictionResult) {
-  return {
-    position: estimate.position,
-    peopleAhead: estimate.peopleAhead,
-    minMinutes: estimate.minMinutes,
-    maxMinutes: estimate.maxMinutes,
-    shouldAlert: estimate.shouldAlert,
-  };
+// The estimate for one specific visitor: how many people are ahead of them,
+// then the same waitEstimate the routes use.
+export function predictForVisitor(
+  visitor: Visitor,
+  activeVisitors: Visitor[],
+  durations: number[],
+  queue: Queue,
+): PredictionResult {
+  // A served or cancelled visitor is not in line any more. There is no wait to
+  // report, so every field is zero rather than a stale estimate.
+  if (visitor.status === "served" || visitor.status === "cancelled") {
+    return { position: 0, peopleAhead: 0, minMinutes: 0, maxMinutes: 0, shouldAlert: false };
+  }
+
+  // Lower ticket number means they arrived earlier, so they are ahead of us.
+  // Filter on waiting/called even though activeVisitors should only hold those:
+  // a caller that passes the whole table would otherwise let one leftover
+  // served visitor inflate somebody's wait by minutes.
+  const peopleAhead = activeVisitors.filter(
+    (v) => v.ticketNo < visitor.ticketNo && (v.status === "waiting" || v.status === "called"),
+  ).length;
+
+  return waitEstimate(peopleAhead, queue, durations);
 }
 
 // Run with: node src/lib/prediction.ts
@@ -139,6 +172,17 @@ function selfCheck() {
   // Staff moving the speed slider changes the wait.
   assert("speed 2 halves the wait", predict(3, 300, 2).minMinutes, 6);
   assert("speed 4 quarters the wait", predict(3, 300, 4).minMinutes, 3);
+
+  // 0.25 is the bottom of the allowed range (validate.ts toSpeed, and the CHECK
+  // constraint in the schema, both stop at 0.25), so it is a value a real queue
+  // can actually hold. A desk a quarter speed takes 4x as long: 3 people at 300s
+  // is a 60 min middle, so the window is 48 to 72.
+  assert("speed 0.25 quadruples the wait", predict(3, 300, 0.25).minMinutes, Math.ceil((3 * 300) / 0.25 / 60 * 0.8));
+  assert("speed 0.25 has the longest window", predict(3, 300, 0.25).maxMinutes, Math.ceil((3 * 300) / 0.25 / 60 * 1.2));
+  // The two ends of the allowed range are 16x apart on the middle (1/0.25 over
+  // 1/4), so the fastest desk and the slowest desk must differ by exactly that.
+  assert("speed 0.25 is the mirror of speed 4",
+    predict(3, 300, 0.25).minMinutes, predict(3, 300, 4).minMinutes * 16);
 
   // A speed of 0 must not divide the wait down to nothing. It clamps to 0.1,
   // so 3 people at 300s become 9000s = 150 minutes, and the top of the window
@@ -187,6 +231,50 @@ function selfCheck() {
   // says. 3 people at a real 150s average at 2x is 3.75 min -> window to 5.
   const fastAndQuick = waitEstimate(3, { avgServiceSeconds: 300, speedMultiplier: 2, alertAtPosition: 3 } as Queue, [120, 180, 150]);
   assert("speed still divides the history", fastAndQuick.maxMinutes, 5);
+
+  // ---- the same estimate, asked about one real visitor ----
+
+  // Fakes, so the visitor cases below read as queue data and not as objects.
+  const fakeQueue = (over: Partial<Queue> = {}): Queue =>
+    ({ avgServiceSeconds: 300, speedMultiplier: 1, alertAtPosition: 3, ...over }) as Queue;
+  const fakeVisitor = (ticketNo: number, over: Partial<Visitor> = {}): Visitor =>
+    ({ ticketNo, status: "waiting", ...over }) as Visitor;
+  // Everyone still ahead of ticket 5, by ticket number.
+  const lineAhead = (count: number) => Array.from({ length: count }, (_, i) => fakeVisitor(i + 1));
+  const me = fakeVisitor(5);
+
+  // No history means there is nothing to average, so the fallback stands.
+  assert("empty history falls back", computeAverage([], 300), 300);
+  // 120 + 180 + 240 = 540 / 3 = 180. One sample is enough here, unlike above.
+  assert("normal history averages", computeAverage([120, 180, 240], 300), 180);
+
+  // 3 ahead at 300s is a 12 min floor, so a desk at 2x is a 6 min floor.
+  const normalSpeed = predictForVisitor(me, lineAhead(3), [], fakeQueue());
+  const doubleSpeed = predictForVisitor(me, lineAhead(3), [], fakeQueue({ speedMultiplier: 2 }));
+  assert("speed 2 halves the wait", doubleSpeed.minMinutes * 2, normalSpeed.minMinutes);
+
+  // Same three people, same history, desk crawling at half speed.
+  const halfSpeed = predictForVisitor(me, lineAhead(3), [], fakeQueue({ speedMultiplier: 0.5 }));
+  assert("speed 0.5 doubles the wait", halfSpeed.minMinutes, normalSpeed.minMinutes * 2);
+
+  // Nobody ahead means the desk is next, so the wait is zero either end.
+  const next = predictForVisitor(fakeVisitor(1), [], [], fakeQueue());
+  assert("first in line waits zero minutes", [next.minMinutes, next.maxMinutes], [0, 0]);
+
+  // Already at the desk: nothing left to wait for, so no alert either.
+  const done = predictForVisitor(
+    fakeVisitor(5, { status: "served" }), lineAhead(3), [], fakeQueue(),
+  );
+  assert("a served visitor has no wait", done, {
+    position: 0, peopleAhead: 0, minMinutes: 0, maxMinutes: 0, shouldAlert: false,
+  });
+
+  // Alerting is about position in line, not minutes: 3 ahead is close enough,
+  // 4 ahead is not, even though waiting longer.
+  assert("alert threshold fires at three ahead",
+    predictForVisitor(me, lineAhead(3), [], fakeQueue()).shouldAlert, true);
+  assert("alert threshold holds at four ahead",
+    predictForVisitor(me, lineAhead(4), [], fakeQueue()).shouldAlert, false);
 
   console.log(process.exitCode ? "\nFAILED" : "\nall checks passed");
 }
