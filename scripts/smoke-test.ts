@@ -295,10 +295,20 @@ async function main(): Promise<void> {
   };
 
   // Walking `next` up the line is what pushes the deep visitor into the window.
+  //
+  // Each `next` has to be paired with a `done`, exactly like a real desk. A
+  // visitor left in `called` still counts as someone ahead of you (alerts.ts
+  // counts the whole active list), so without the `done` everyone we call just
+  // piles up at the front, the deep visitor never actually reaches the front,
+  // and the alert window is never entered -- the check would prove nothing.
   for (let i = 0; i < 14 && !alerted; i++) {
     const before = await listWaiting();
     if (before.length <= 1) break;
-    await post("/api/queue/next", { queueId: QID });
+    const n = await post("/api/queue/next", { queueId: QID });
+    const calledId = String((((n.body.data as Json)?.visitor) as Json | undefined)?.id ?? "");
+    if (calledId) {
+      await post("/api/queue/done", { queueId: QID, visitorId: calledId, simulatedSeconds: 60 });
+    }
     await poll();
   }
 
@@ -357,7 +367,10 @@ async function main(): Promise<void> {
   const badCases: [string, () => Promise<Reply>][] = [
     ["empty name", () => post("/api/queue/join", { queueId: QID, name: "" })],
     ["200-char name", () => post("/api/queue/join", { queueId: QID, name: longName })],
-    ["missing queueId", () => post("/api/queue/join", { name: "no queue" })],
+    // queueId is deliberately NOT required: resolveQueueId() picks the default
+    // queue, which is what the merged frontend sends. Asserting a 400 here
+    // would pin a contract we deliberately removed. Covered positively in
+    // verify-live C2, which joins with no queueId at all.
     ["malformed JSON", () => post("/api/queue/join", null, '{"queueId": ')],
     ["unknown visitorId", () => api(`/api/queue/status?visitorId=${crypto.randomUUID()}`)],
     // The speed range is 0.25 to 4 inclusive. Anything outside is a 400, which

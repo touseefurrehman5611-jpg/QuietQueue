@@ -11,7 +11,10 @@
     "check:ai": "node src/lib/ai.ts",
     "check:validate": "node src/lib/validate.ts",
     "test": "npm run check:prediction && npm run check:ai && npm run check:validate",
-    "smoke": "node scripts/smoke-test.ts"
+    "smoke": "node scripts/smoke-test.ts",
+    "verify": "node scripts/verify-live.ts",
+    "preflight": "node scripts/preflight.ts",
+    "demo": "npm run build && node scripts/preflight.ts && npm start"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.2",
