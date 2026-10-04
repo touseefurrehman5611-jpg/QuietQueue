@@ -5,12 +5,13 @@
 // Body: { queueId: string, speedMultiplier: number }
 
 import { updateQueueSpeed } from "@/lib/db";
-import { ok, fail, run } from "@/lib/respond";
+import { ok, fail, run, readJson } from "@/lib/respond";
 import { isNonEmptyString, toSpeed } from "@/lib/validate";
 
 export async function POST(request: Request) {
   return run(async () => {
-    const body = await request.json();
+    const body = await readJson(request);
+    if (!body) return fail("request body must be a JSON object");
     if (!isNonEmptyString(body?.queueId)) return fail("queueId is required");
 
     // toSpeed only accepts 0.25 to 4. Anything else is a 400, so a typo can

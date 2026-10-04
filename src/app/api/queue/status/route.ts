@@ -17,10 +17,13 @@ export async function GET(request: Request) {
     const queue = await getQueue(visitor.queueId);
 
     // Finished visitors get a plain answer. No queue maths needed.
+    // queueName is still returned so the field is never missing, even though
+    // the frontend has no reason to show it on the "thanks" screen.
     if (visitor.status === "served" || visitor.status === "cancelled") {
       return ok({
         status: visitor.status,
         ticketNo: visitor.ticketNo,
+        queueName: queue.name,
         position: null,
         peopleAhead: null,
         minMinutes: null,

@@ -20,11 +20,20 @@
 // greeting, they have to add it here deliberately, knowing it goes to a third
 // party.
 
-import { ok, fail, run } from "@/lib/respond";
+import { ok, fail, run, readJson } from "@/lib/respond";
 import { toCount } from "@/lib/validate";
 
 // Keep this small and cheap. It writes one sentence about numbers we give it.
-const MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+//
+// Checked against the models this key can actually reach. If you get
+// "model_not_found" from Groq, run this to see what your key has:
+//
+//   curl https://api.groq.com/openai/v1/models -H "Authorization: Bearer $GROQ_API_KEY"
+//
+// Note: some Groq models (for example gpt-oss-120b) are reasoning models and
+// return an empty `content` with the text under a different channel, so they do
+// not work here. This one returns plain text.
+const MODEL = process.env.GROQ_MODEL || "qwen/qwen3.8-27b";
 
 // Give up fast. A visitor staring at a spinner learns nothing, and the plain
 // fallback is ready in the same instant.
@@ -68,7 +77,8 @@ const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 export async function POST(request: Request) {
   return run(async () => {
-    const body = await request.json();
+    const body = await readJson(request);
+    if (!body) return fail("request body must be a JSON object");
 
     // We need a position to say anything sensible.
     const position = toCount(body?.position);

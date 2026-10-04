@@ -136,12 +136,25 @@ alter table public.queues   replica identity full;
 -- service_events is not published: Amna's screens subscribe to visitors and
 -- queues only, and one message per finished visit would just be noise.
 --
--- Postgres has no "add to publication if not present". So we remove the tables
--- from the publication first, then add them back. That way re-running this file
--- does not fail with "relation is already member of publication" and roll the
--- whole batch back.
-alter publication supabase_realtime drop table public.visitors;
-alter publication supabase_realtime drop table public.queues;
+-- Both Postgres statements here fail if the table is in the wrong state:
+--   "add table"    fails if the table is ALREADY a member.
+--   "drop table"   fails if the table is NOT a member.
+-- A brand new Supabase project has an empty publication, so a plain drop-first
+-- would abort on the very first run. So we check pg_publication_tables first and
+-- only drop when it really is a member. That makes this safe both first-run and
+-- re-run, which a plain drop or a plain add cannot do.
+do $$
+begin
+  if exists (select 1 from pg_publication_tables
+             where pubname = 'supabase_realtime' and tablename = 'visitors') then
+    alter publication supabase_realtime drop table public.visitors;
+  end if;
+
+  if exists (select 1 from pg_publication_tables
+             where pubname = 'supabase_realtime' and tablename = 'queues') then
+    alter publication supabase_realtime drop table public.queues;
+  end if;
+end $$;
 
 alter publication supabase_realtime add table public.visitors;
 alter publication supabase_realtime add table public.queues;

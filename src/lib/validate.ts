@@ -8,9 +8,24 @@ export function isNonEmptyString(value: unknown): value is string {
 }
 
 // A whole number of 0 or more. Rejects "3abc", 3.7 and negatives.
+//
+// Blank strings are rejected BEFORE Number(), because Number("") is 0 and an
+// empty <input type="number"> sends "" — which would otherwise be read as a
+// real measurement of zero.
+function toNumber(value: unknown): number | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    // "" and "   " mean the field was left empty, not zero.
+    if (trimmed === "") return null;
+    return Number(trimmed);
+  }
+  return typeof value === "number" ? value : null;
+}
+
+// A whole number of 0 or more. Rejects "3abc", 3.7 and negatives.
 export function toCount(value: unknown): number | null {
-  const n = typeof value === "string" ? Number(value) : value;
-  if (typeof n !== "number" || !Number.isInteger(n) || n < 0) return null;
+  const n = toNumber(value);
+  if (n === null || !Number.isInteger(n) || n < 0) return null;
   return n;
 }
 
@@ -18,8 +33,8 @@ export function toCount(value: unknown): number | null {
 // The brief allows 0.25 to 4 and nothing outside that. Anything else is a 400,
 // so a typo can never make the prediction divide by zero or run away.
 export function toSpeed(value: unknown): number | null {
-  const n = typeof value === "string" ? Number(value) : value;
-  if (typeof n !== "number" || !Number.isFinite(n)) return null;
+  const n = toNumber(value);
+  if (n === null || !Number.isFinite(n)) return null;
   if (n < 0.25 || n > 4) return null;
   return n;
 }

@@ -7,12 +7,13 @@
 
 import { createVisitor, getQueue, getRecentServiceDurations, listActiveVisitors } from "@/lib/db";
 import { waitEstimate } from "@/lib/prediction";
-import { ok, fail, run } from "@/lib/respond";
+import { ok, fail, run, readJson } from "@/lib/respond";
 import { isNonEmptyString } from "@/lib/validate";
 
 export async function POST(request: Request) {
   return run(async () => {
-    const body = await request.json();
+    const body = await readJson(request);
+    if (!body) return fail("request body must be a JSON object");
 
     if (!isNonEmptyString(body?.queueId)) return fail("queueId is required");
     if (!isNonEmptyString(body?.name)) return fail("name is required");

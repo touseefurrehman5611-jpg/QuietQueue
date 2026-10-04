@@ -123,7 +123,7 @@ somebody is called or finishes, and Realtime will not fire for the maths.
   `/api/ai/message`. The backend sets `alerted` to true automatically on that
   poll, so you only notify once: **notify when `shouldAlert && !previousAlerted`.**
 
-**Errors** — 400 `visitorId is required`, 404 if that id does not exist, 500 on a database failure.
+**Errors** — 400 `visitorId is required`, 404 `not found` if that id does not exist, 500 on a database failure.
 
 ---
 
@@ -156,15 +156,19 @@ returned sentence.
 { "ok": true, "data": { "message": "You are number 3 in line, about 12 to 18 minutes to wait.", "source": "groq" } }
 ```
 
-**`source` matters.** It is `groq` when the AI wrote it, or `fallback` when it
+****`source` matters.** It is `groq` when the AI wrote it, or `fallback` when it
 could not be reached. `reason` is also present on a fallback and explains why
-(missing key, timeout, rate limit).
+(missing key, timeout, rate limit, wrong model).
+
+Check `source` during testing. If it always says `fallback` with a
+`model_not_found` reason, `GROQ_MODEL` names a model your key cannot reach — see
+the comment at the top of `src/app/api/ai/message/route.ts`.
 
 **This endpoint does not fail for an AI problem.** It always returns `ok: true`
 with a usable `message`. If the model is down you still get a correct plain
 sentence. Do not build an error state for it — there is nothing to retry.
 
-**Errors** — only 400 if `position` is missing, and 500 on a programming fault.
+**Errors** — only 400 if `position` is missing or the body is not a JSON object, and 500 on a programming fault.
 
 ---
 
@@ -215,7 +219,12 @@ desk.
 "no data yet" rather than 0 minutes — a zero average reads as an instant queue
 and looks like a bug.
 
-**Errors** — 400 `queueId is required`, 404 for a bad id, 500 on a database failure.
+**Errors** — 400 `queueId is required` / `request body must be a JSON object`, 404 `not found` for an id that does not exist, 500 on a database failure.
+
+**A 404 carries the message `"not found"` and a 500 carries `"something went
+wrong on our side"`.** We deliberately do not pass the raw database error to the
+browser — it contains table and column names. The real reason is in the server
+log, so if you get an unexpected 500, check the terminal running `npm run dev`.
 
 ---
 
@@ -239,7 +248,7 @@ skips somebody.
 }
 ```
 
-**Errors** — 400 `queueId is required`, 404 `nobody is waiting in this queue`.
+**Errors** — 400 `queueId is required` / `request body must be a JSON object`, 404 `nobody is waiting in this queue`.
 
 ---
 
@@ -270,7 +279,7 @@ is what makes the estimate improve over the day.
 
 `simulated` tells you whether the duration was real or faked.
 
-**Errors** — 400 `visitorId is required`, **409 `visitor is <status>, not called`**.
+**Errors** — 400 `visitorId is required` / `request body must be a JSON object`, 404 `not found`, **409 `visitor is <status>, not called`**.
 The 409 matters: it means the staff screen is out of sync with the backend, so
 do not retry, just refetch `/list`.
 
@@ -284,7 +293,7 @@ Somebody left. Takes them out without renumbering anybody else.
 
 **Response — 200** — `{ "ok": true, "data": { "visitor": { ... } } }`
 
-**Errors** — 400 `visitorId is required`, 409 `visitor has already been served` / `visitor is already cancelled`.
+**Errors** — 400 `visitorId is required` / `request body must be a JSON object`, 404 `not found`, 409 `visitor has already been served` / `visitor is already cancelled`.
 
 ---
 
@@ -305,7 +314,11 @@ Staff move the speed slider. 1 is normal, 2 is twice as fast, 0.5 is half.
 { "ok": true, "data": { "queue": { "id": "uuid", "name": "Main Queue", "avgServiceSeconds": 300, "alertAtPosition": 3, "speedMultiplier": 2, "createdAt": "..." } } }
 ```
 
-**Errors** — 400 `queueId is required`, 400 `speedMultiplier must be a number between 0.25 and 4`, 404 for a bad queue id. The range is enforced twice — here and by a database constraint — so a bad value can never break the estimate.
+**Errors** — 400 `queueId is required` / `request body must be a JSON object` / `speedMultiplier must be a number between 0.25 and 4`, 404 `not found` for a bad queue id. The range is enforced twice — here and by a database constraint — so a bad value can never break the estimate.
+
+An **empty string is not zero**. If a number field is left blank you get a 400,
+not a silent 0 — which matters, because a silent 0 would be recorded as a real
+measurement instead of falling back to the true value.
 
 ---
 
