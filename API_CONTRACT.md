@@ -127,11 +127,12 @@ Base URL in development: `http://localhost:3000`
 | POST | `/api/queue/join` | visitor | Take a ticket, get an estimate back |
 | GET | `/api/queue/status?visitorId=` | visitor | Poll for position, wait and a ready-made message |
 | POST | `/api/ai/message` | visitor | Turn an estimate into one friendly sentence (optional) |
-| GET | `/api/queue/list?queueId=` | staff | The whole line plus dashboard numbers |
-| POST | `/api/queue/next` | staff | Call the next person waiting |
+| GET | `/api/queue/list?queueId=` | staff | The whole line plus dashboard numbers (`queueId` optional) |
+| POST | `/api/queue/next` | staff | Call the next person waiting (`queueId` optional) |
 | POST | `/api/queue/done` | staff | Finish the person at the desk |
 | POST | `/api/queue/cancel` | either | Remove somebody who left |
 | POST | `/api/queue/speed` | staff | Move the speed slider |
+| POST | `/api/demo/simulate` | staff | Fill the queue with made-up visitors, for demoing |
 
 Five of those eight check the optional staff key. See *The optional staff key*.
 
@@ -180,7 +181,7 @@ Save `visitorId`. Every later call needs it. `name` is **not** echoed back here 
 | Status | `error` | When |
 |---|---|---|
 | 400 | `request body must be a JSON object` | No body, broken JSON, or a body that is an array or a bare value |
-| 400 | `queueId is required` | Missing, empty, or whitespace |
+| 400 | `queueId is required` | Empty or whitespace. **A missing `queueId` is no longer an error** — the server picks the queue (see below) |
 | 400 | `name must be at least 2 characters` | Missing, not a string, or 1 character after trimming |
 | 400 | `name must be at most 40 characters` | Over 40 characters after trimming |
 | 400 | `phone must be a number` | Present but not a string |
@@ -599,7 +600,7 @@ counts in it.
 
 | Status | `error` | When |
 |---|---|---|
-| 400 | `queueId is required` | Missing or empty |
+| 400 | `queueId is required` | Empty or whitespace. A missing `queueId` is no longer an error |
 | 400 | `invalid id format` | Not uuid-shaped |
 | 404 | `not found` | uuid-shaped but no such queue |
 | 403 | `not allowed` | Staff key is set and the header was missing or wrong |
@@ -638,8 +639,8 @@ it on the staff screen if you want to.
 
 | Status | `error` | When |
 |---|---|---|
-| 400 | `request body must be a JSON object` | |
-| 400 | `queueId is required` | |
+| 400 | `request body must be a JSON object` | Only if the body is present but unparseable — an empty POST body is fine |
+| 400 | `queueId is required` | Only if `queueId` is present but blank. A missing one is fine |
 | 400 | `invalid id format` | |
 | 404 | `not found` | uuid-shaped queue id that does not exist |
 | 404 | `No one is waiting` | The queue is empty, or everybody in it is already called. **Capital N, capital O, capital W** |
@@ -813,6 +814,25 @@ Worth knowing so the UI does not contradict it.
    is short. It is about how close you are in line, not how many minutes you have.
 
 ---
+
+## When you do not send a queueId
+
+`/join`, `/list` and `/next` treat `queueId` as optional, because the staff
+dashboard has no queue picker: it opens at `/staff` and calls those routes with
+an empty body. Rather than make the UI carry an id it has no way to learn, the
+server resolves one in this order:
+
+1. `DEFAULT_QUEUE_ID`, if set to a real queue
+2. the oldest queue, by `created_at`
+3. a new queue named `Main Queue`, if the project has none at all
+
+So sending `queueId` still works and wins, and omitting it works too. The one
+behaviour change is that a typo'd-but-valid uuid still 404s, while a *missing*
+id no longer 400s.
+
+`/speed`, `/done` and `/cancel` do not need this: `/done` and `/cancel` work
+from a visitor id, and `/speed` is called from a screen that already knows the
+queue.
 
 ## Live updates
 

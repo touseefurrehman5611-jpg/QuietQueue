@@ -2,7 +2,7 @@
 //
 // What staff see. The whole line plus the dashboard numbers.
 //
-// Query: ?queueId=<uuid>
+// Query: ?queueId=<uuid>   (optional -- the server picks one, see resolveQueueId)
 //
 // Each visitor carries their own position and wait window, so the staff screen
 // can show "3rd, about 12 to 18 min" without doing any arithmetic. That is
@@ -27,20 +27,23 @@ import {
   getStats,
   getVisitorPhones,
   listActiveVisitors,
+  resolveQueueId,
 } from "@/lib/db";
 import { staffKey } from "@/lib/auth";
 import { predictForVisitor } from "@/lib/prediction";
-import { ok, fail, run } from "@/lib/respond";
+import { ok, run } from "@/lib/respond";
 
 export async function GET(request: Request) {
   const denied = staffKey(request);
   if (denied) return denied;
 
   return run(async () => {
-    const queueId = new URL(request.url).searchParams.get("queueId");
-    if (!queueId) return fail("queueId is required");
+    const requested = new URL(request.url).searchParams.get("queueId");
 
-    const queue = await getQueue(queueId);
+    // Amna's staff screen opens at /staff with nothing to put a queueId in, so
+    // a missing one is normal here rather than a mistake.
+    const queue = requested ? await getQueue(requested) : await resolveQueueId();
+    const queueId = queue.id;
     const active = await listActiveVisitors(queueId);
     const stats = await getStats(queueId);
     const recent = await getRecentServiceDurations(queueId);

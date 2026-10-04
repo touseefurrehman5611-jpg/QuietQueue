@@ -1,19 +1,28 @@
 'use client';
 
-import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
+import { apiGet, statusOf } from '@/lib/api';
 
+// The shape GET /api/queue/status actually returns. `peopleAhead` replaces the
+// `totalWaiting` this screen used to show: the route counts the people in front
+// of you, which is the number a waiting visitor actually wants, and it needs no
+// second query for a total.
 interface QueueStatus {
   visitorId: string;
   ticketNo: number;
-  position: number;
-  totalWaiting: number;
-  status: 'waiting' | 'called' | 'served' | 'cancelled';
-  minMinutes: number;
-  maxMinutes: number;
+  name: string;
+  queueName: string;
+  position: number | null;
+  peopleAhead: number | null;
+  minMinutes: number | null;
+  maxMinutes: number | null;
+  shouldAlert: boolean;
   alerted: boolean;
+  message: string | null;
+  status: 'waiting' | 'called' | 'served' | 'cancelled';
 }
 
 const POLL_INTERVAL_MS = 10000;
@@ -39,28 +48,24 @@ function VisitorStatus() {
   const [status, setStatus] = useState<QueueStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [alertMessage, setAlertMessage] = useState<string | null>(null);
-  const fetchedAlertFor = useRef<string | null>(null);
 
   const fetchStatus = useCallback(async () => {
     if (!visitorId) return;
 
     try {
-      const res = await fetch(`/api/queue/status?visitorId=${encodeURIComponent(visitorId)}`);
-      if (res.status === 404) {
-        setError('We could not find that visitor. Please check the link and try again.');
-        return;
-      }
-      if (!res.ok) {
-        setError('Something went wrong loading your queue status.');
-        return;
-      }
-
-      const data: QueueStatus = await res.json();
+      const data = await apiGet<QueueStatus>(
+        `/api/queue/status?visitorId=${encodeURIComponent(visitorId)}`
+      );
       setStatus(data);
       setError(null);
-    } catch {
-      setError('Network problem. Retrying...');
+    } catch (err) {
+      // A bad link is permanent, so say so and stop retrying. A network blip is
+      // not, so leave the message up and let the poll try again.
+      if (statusOf(err) === 404) {
+        setError('We could not find that visitor. Please check the link and try again.');
+      } else {
+        setError('Network problem. Retrying...');
+      }
     } finally {
       setLoading(false);
     }
@@ -96,26 +101,6 @@ function VisitorStatus() {
       if (client && channel) void client.removeChannel(channel);
     };
   }, [visitorId, fetchStatus]);
-
-  // Ask for a friendly message once per alert, not on every poll.
-  useEffect(() => {
-    if (!status?.alerted || fetchedAlertFor.current === status.visitorId) return;
-
-    fetchedAlertFor.current = status.visitorId;
-    void (async () => {
-      try {
-        const res = await fetch('/api/ai/message', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ position: status.position }),
-        });
-        const data = await res.json();
-        if (data.message) setAlertMessage(data.message);
-      } catch {
-        // A missing AI message is cosmetic; the banner below still renders.
-      }
-    })();
-  }, [status]);
 
   if (!visitorId) {
     return (
@@ -173,23 +158,19 @@ function VisitorStatus() {
       {status.status === 'waiting' && (
         <>
           <div className='mb-4 grid grid-cols-2 gap-4'>
-            <Stat label='People ahead' value={String(Math.max(0, status.position - 1))} />
-            <Stat label='Total waiting' value={String(status.totalWaiting)} />
+            <Stat label='People ahead' value={String(status.peopleAhead ?? 0)} />
+            <Stat label='Position' value={String(status.position ?? 0)} />
           </div>
 
           <div className='mb-4 rounded-lg bg-white p-4 text-center shadow'>
             <p className='text-sm text-gray-600'>Estimated wait</p>
-            <p className='text-2xl font-bold'>
-              {status.minMinutes === status.maxMinutes
-                ? `${status.minMinutes} min`
-                : `${status.minMinutes}-${status.maxMinutes} min`}
-            </p>
+            <p className='text-2xl font-bold'>{waitLabel(status)}</p>
           </div>
 
-          {status.alerted && (
+          {status.shouldAlert && (
             <div className='mb-4 rounded-md border border-amber-300 bg-amber-50 p-4'>
               <p className='text-center text-sm font-medium text-amber-900'>
-                {alertMessage ?? 'Your turn is coming soon!'}
+                {status.message ?? 'Your turn is coming soon!'}
               </p>
             </div>
           )}
@@ -214,6 +195,17 @@ function VisitorStatus() {
       </Link>
     </Shell>
   );
+}
+
+// The wait is a window, not a number, so say "12-18 min" when it is wide and
+// plain "0 min" when someone is next. The route returns null rather than a
+// number once a visit is finished, which this screen never reaches, but a
+// null-safe label costs one line and cannot print "null-null min".
+function waitLabel(status: QueueStatus): string {
+  const { minMinutes, maxMinutes } = status;
+  if (minMinutes === null) return 'Computing...';
+  if (maxMinutes === null || maxMinutes === minMinutes) return `${minMinutes} min`;
+  return `${minMinutes}-${maxMinutes} min`;
 }
 
 const STATUS_BANNER: Record<QueueStatus['status'], { wrapper: string; label: string; text: string }> = {

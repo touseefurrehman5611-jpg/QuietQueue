@@ -2,9 +2,21 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
-import type { Visitor } from '@/types';
+import { apiGet, apiPost } from '@/lib/api';
+import type { PredictionResult, Visitor } from '@/lib/types';
 import { useToast } from '@/components/ToastProvider';
 import { EmptyState } from '@/components/EmptyState';
+
+// One row on the staff screen: the visitor as the API returns them, plus the
+// wait estimate and the phone number that /api/queue/list attaches. `phone` is
+// optional in the type because only this staff route ever sends one.
+type StaffVisitor = Visitor & PredictionResult & { phone?: string | null };
+
+type QueueList = {
+  waiting: StaffVisitor[];
+  called: StaffVisitor[];
+  stats: { servedCount: number; avgWaitMinutes: number | null };
+};
 
 // Phone is free-text from the join form, so strip everything that is illegal in
 // a tel: URI before building the href. Returns null when nothing dialable is left.
@@ -15,19 +27,26 @@ function toTelHref(phone: string): string | null {
 }
 
 export default function StaffPage() {
-  const [visitors, setVisitors] = useState<Visitor[]>([]);
-  const [stats, setStats] = useState({ avgWait: 0, servedCount: 0 });
+  const [visitors, setVisitors] = useState<StaffVisitor[]>([]);
+  const [stats, setStats] = useState({ avgWaitMinutes: 0, servedCount: 0 });
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const toast = useToast();
 
   const fetchVisitors = useCallback(async () => {
     try {
-      const res = await fetch('/api/queue/list');
-      if (!res.ok) throw new Error('list failed');
-      const data = await res.json();
-      setVisitors(data.visitors || []);
-      setStats({ avgWait: data.avgWait ?? 0, servedCount: data.servedCount ?? 0 });
+      // No queueId in the URL: the route picks the queue (resolveQueueId), so
+      // this screen works on a fresh project with no setup at all.
+      const data = await apiGet<QueueList>('/api/queue/list');
+
+      // The route already splits the line into waiting and called, and this
+      // screen renders those two groups in that order, so concatenating them
+      // here reproduces exactly what it drew before.
+      setVisitors([...data.called, ...data.waiting]);
+      setStats({
+        avgWaitMinutes: data.stats.avgWaitMinutes ?? 0,
+        servedCount: data.stats.servedCount ?? 0,
+      });
     } catch {
       toast.error('Could not load the queue. Retrying shortly.');
     } finally {
@@ -64,22 +83,16 @@ export default function StaffPage() {
     async (options: { url: string; body?: unknown; success: string; failure: string; id?: string }) => {
       setBusyId(options.id ?? 'global');
       try {
-        const res = await fetch(options.url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(options.body ?? {}),
-        });
-        const data = await res.json().catch(() => ({}));
-
-        if (!res.ok) {
-          toast.error(data.error ?? options.failure);
-          return false;
-        }
+        // apiPost throws with the route's own error message, so a 409 from
+        // /done ("visitor is waiting, not called") reaches the person instead
+        // of being flattened into a generic network complaint.
+        await apiPost(options.url, options.body);
         toast.success(options.success);
         await fetchVisitors();
         return true;
-      } catch {
-        toast.error('Network problem. Please try again.');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : options.failure;
+        toast.error(message || options.failure);
         return false;
       } finally {
         setBusyId(null);
@@ -169,7 +182,7 @@ export default function StaffPage() {
 
       <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
         <StatCard label="Waiting" value={waitingVisitors.length} />
-        <StatCard label="Average Wait (min)" value={Math.round(stats.avgWait / 60) || 0} />
+        <StatCard label="Average Wait (min)" value={stats.avgWaitMinutes} />
         <StatCard label="Served" value={stats.servedCount} />
       </div>
 
@@ -247,7 +260,7 @@ export default function StaffPage() {
                   key={visitor.id}
                   visitor={visitor}
                   busy={busyId === visitor.id}
-                  meta={`Position ${index + 1}`}
+                  meta={`Position ${visitor.position}`}
                   actions={
                     <>
                       {index === 0 && (
@@ -293,7 +306,7 @@ function VisitorRow({
   busy,
   actions,
 }: {
-  visitor: Visitor;
+  visitor: StaffVisitor;
   meta?: string;
   busy: boolean;
   actions: React.ReactNode;
@@ -306,7 +319,7 @@ function VisitorRow({
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <p className="truncate font-bold">
-            #{visitor.ticket_no} &middot; {visitor.name}
+            #{visitor.ticketNo} &middot; {visitor.name}
           </p>
           <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-gray-600">
             {meta && <span>{meta}</span>}

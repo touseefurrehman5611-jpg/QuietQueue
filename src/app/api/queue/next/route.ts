@@ -2,11 +2,14 @@
 //
 // Staff press one button to call the next person in line.
 //
-// Body: { queueId: string }
+// Body: { queueId?: string }
+//
+// queueId is optional, same as on /join and /list. The "Call Next" button
+// posts an empty body because the staff screen has no queue picker.
 
 import { checkAndMarkAlerts } from "@/lib/alerts";
 import { staffKey } from "@/lib/auth";
-import { getQueue, listActiveVisitors, setVisitorStatus } from "@/lib/db";
+import { getQueue, listActiveVisitors, resolveQueueId, setVisitorStatus } from "@/lib/db";
 import { ok, fail, run, readJson } from "@/lib/respond";
 import { isNonEmptyString } from "@/lib/validate";
 
@@ -15,11 +18,12 @@ export async function POST(request: Request) {
   if (denied) return denied;
 
   return run(async () => {
-    const body = await readJson(request);
-    if (!body) return fail("request body must be a JSON object");
-    if (!isNonEmptyString(body?.queueId)) return fail("queueId is required");
-
-    const queue = await getQueue(body.queueId.trim());
+    // A missing or unparseable body is fine here: queueId is optional, so an
+    // empty POST means "call whoever is next in the default queue".
+    const body = (await readJson(request)) ?? {};
+    const queue = isNonEmptyString(body.queueId)
+      ? await getQueue(body.queueId.trim())
+      : await resolveQueueId();
     const active = await listActiveVisitors(queue.id);
 
     // listActiveVisitors already sorts by ticket number, so the first waiting

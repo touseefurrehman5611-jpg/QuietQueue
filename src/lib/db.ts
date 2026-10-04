@@ -111,6 +111,50 @@ export async function getQueue(queueId: string): Promise<Queue> {
   return rowToQueue(data as QueueRow);
 }
 
+// Which queue to work on when the caller did not say.
+//
+// Needed because the staff dashboard has no queue picker: it opens at /staff
+// and calls /api/queue/next with an empty body. Rather than make the UI carry a
+// queue id it has no way to learn, the server decides. Three steps, in order:
+//
+//   1. DEFAULT_QUEUE_ID, if it is set to a real queue. The only way to pin a
+//      specific queue when the project has more than one.
+//   2. Otherwise the oldest queue. Oldest, not newest, so a queue created for a
+//      demo does not silently steal the traffic from the real one.
+//   3. If there are none at all, make one. That is what makes a fresh Supabase
+//      project work the moment 001_init.sql has run, with no SQL to paste.
+export async function resolveQueueId(): Promise<Queue> {
+  const configured = process.env.DEFAULT_QUEUE_ID;
+
+  if (configured) return getQueue(configured.trim());
+
+  // oldest first, so this is stable no matter how many queues get added later
+  const { data, error } = await getSupabaseAdmin()
+    .from("queues")
+    .select("*")
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) dbError(error, "could not load any queue");
+
+  if (data) return rowToQueue(data as QueueRow);
+
+  const { data: created, error: insertError } = await getSupabaseAdmin()
+    .from("queues")
+    .insert({ name: "Main Queue" })
+    .select()
+    .single();
+
+  // Two requests can both find an empty queues table and both try to create.
+  // The loser gets 23505, which is not a failure worth surfacing: by then the
+  // other request has already made the queue. Re-read and use it.
+  if (insertError && insertError.code === DUPLICATE_KEY) return resolveQueueId();
+  if (insertError) dbError(insertError, "could not create a queue");
+
+  return rowToQueue(created as QueueRow);
+}
+
 // Change how fast the desk is working. The 0.25 to 4 range is checked by
 // toSpeed() in validate.ts and again by a CHECK constraint in the database.
 export async function updateQueueSpeed(

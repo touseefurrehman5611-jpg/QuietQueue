@@ -2,9 +2,12 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
+import { apiPost } from '@/lib/api';
 import { useToast } from '@/components/ToastProvider';
 
 type Mode = 'join' | 'check';
+
+type JoinResult = { visitorId: string; ticketNo: number };
 
 export default function VisitorPage() {
   const [mode, setMode] = useState<Mode>('join');
@@ -117,22 +120,20 @@ function JoinForm() {
 
     setLoading(true);
     try {
-      const res = await fetch('/api/queue/join', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name.trim(), phone: phone.trim() || undefined }),
+      // No queueId: /api/queue/join picks the queue when it is not sent, so a
+      // brand new project works without anyone filling in a uuid first.
+      const data = await apiPost<JoinResult>('/api/queue/join', {
+        name: name.trim(),
+        phone: phone.trim() || undefined,
       });
-      const data = await res.json();
-
-      if (!res.ok || !data.visitorId) {
-        toast.error(data.error ?? 'Could not join the queue. Please try again.');
-        return;
-      }
 
       setJoinedAs({ visitorId: data.visitorId, ticketNo: data.ticketNo });
       toast.success(`You are in the queue. Your ticket is #${data.ticketNo}.`);
-    } catch {
-      toast.error('Network problem. Check your connection and try again.');
+    } catch (error) {
+      // The route's own message is better than anything invented here: "name
+      // must be at least 2 characters" tells the visitor what to actually fix.
+      const message = error instanceof Error ? error.message : '';
+      toast.error(message || 'Could not join the queue. Please try again.');
     } finally {
       setLoading(false);
     }
